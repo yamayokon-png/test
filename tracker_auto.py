@@ -177,22 +177,29 @@ def make_trk_from_template(template_path, video_path,
         r'\g<1>' + f'{CALIBRATION_LENGTH_M}' + r'\2',
         trk)
 
-    # --- 既存のPointMassを全部削除してから8個追加 ---
+    # --- 既存のPointMassを全部削除 ---
     trk = re.sub(
-        r'\s*<property name="item" type="object">\s*<object class="org\.opensourcephysics\.cabrillo\.tracker\.PointMass">.*?</object>\s*</property>',
+        r'[ \t]*<property name="item" type="object">\s*'
+        r'<object class="org\.opensourcephysics\.cabrillo\.tracker\.PointMass">.*?'
+        r'</object>\s*</property>\s*',
         '', trk, flags=re.DOTALL)
 
+    # --- 8個のPointMassを tracks コレクションの閉じタグ直前に挿入 ---
     new_masses = "\n".join(
         build_pointmass_xml(i, mx, my, MARKER_COLORS_RGB[i])
         for i, (mx, my) in enumerate(markers)
     )
 
-    # </property> の直前（tracks コレクションの閉じタグ前）に挿入
-    trk = trk.replace(
-        '    </property>\n</object>',
-        new_masses + '\n    </property>\n</object>',
-        1)
+    # tracks collection の閉じタグを探す（ファイル末尾側から最後の </property>）
+    close_tag = '    </property>\n</object>'
+    idx = trk.rfind(close_tag)
+    if idx == -1:
+        close_tag = '    </property>\r\n</object>'
+        idx = trk.rfind(close_tag)
+    if idx == -1:
+        raise ValueError("テンプレートTRKの末尾構造が認識できませんでした。")
 
+    trk = trk[:idx] + new_masses + '\n' + trk[idx:]
     return trk
 
 
@@ -423,13 +430,17 @@ class App(tk.Tk):
         tracker_exe = r"C:\Program Files\Tracker\Tracker.exe"
         java_exe    = r"C:\Program Files\Tracker\OpenJDK-21.0.5.jre\bin\java.exe"
         tracker_jar = r"C:\Program Files\Tracker\tracker-6.3.4.jar"
-        if os.path.exists(tracker_exe):
-            subprocess.Popen([tracker_exe, trk_path])
-        elif os.path.exists(java_exe) and os.path.exists(tracker_jar):
-            subprocess.Popen([java_exe, "-jar", tracker_jar, trk_path])
-        else:
-            messagebox.showwarning("Tracker未検出",
-                f"Trackerが見つかりませんでした。\n手動で開いてください:\n{trk_path}")
+        try:
+            if os.path.exists(tracker_exe):
+                subprocess.Popen([tracker_exe, trk_path])
+            elif os.path.exists(java_exe) and os.path.exists(tracker_jar):
+                subprocess.Popen([java_exe, "-jar", tracker_jar, trk_path])
+            else:
+                messagebox.showwarning("Tracker未検出",
+                    f"TRKファイルは生成されました:\n{trk_path}\n\n"
+                    "Trackerが見つかりません。手動で開いてください。")
+        except Exception as e:
+            messagebox.showerror("起動エラー", str(e))
 
         self.video_idx += 1
         self.after(1500, self._load_current_video)
