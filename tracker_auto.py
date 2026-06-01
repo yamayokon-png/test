@@ -1,206 +1,175 @@
 #!/usr/bin/env python3
 """
-Tracker 半自動ツール（テンプレート方式）
------------------------------------------
-既存のTRKファイルをテンプレートとして使い、
-動画パス・フレーム情報・マーカー位置・キャリブレーションだけ書き換える。
-
-Usage: python tracker_auto.py [動画フォルダ]
+Tracker 半自動ツール
+動画ごとにマーカー8個＋基準2点をクリックするだけでTRKを生成してTrackerを起動する。
 """
 
-import os, sys, re, glob, subprocess, tkinter as tk
+import os, sys, glob, subprocess, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
 
-CALIBRATION_LENGTH_M = 0.10   # マーカー間 10cm
+CALIBRATION_LENGTH_M = 0.10
 PREVIEW_W, PREVIEW_H = 800, 450
-MARKER_COLORS_BGR = [
+COLORS_BGR = [
     (0,0,255),(0,200,0),(255,0,0),(0,150,200),
     (200,0,150),(180,180,0),(0,100,255),(80,80,80)
 ]
-MARKER_COLORS_RGB = [(r,g,b) for (b,g,r) in MARKER_COLORS_BGR]
+COLORS_RGB = [(r,g,b) for (b,g,r) in COLORS_BGR]
+
+TRACKER_EXE = r"C:\Program Files\Tracker\Tracker.exe"
+JAVA_EXE    = r"C:\Program Files\Tracker\OpenJDK-21.0.5.jre\bin\java.exe"
+TRACKER_JAR = r"C:\Program Files\Tracker\tracker-6.3.4.jar"
 
 # -----------------------------------------------------------------------
-# TRK 生成（テンプレート書き換え方式）
+# TRK 生成
 # -----------------------------------------------------------------------
 
-def build_pointmass_xml(idx, x, y, color_rgb):
-    r, g, b = color_rgb
-    name = chr(65 + idx)
-    return f"""        <property name="item" type="object">
-        <object class="org.opensourcephysics.cabrillo.tracker.PointMass">
-            <property name="mass" type="double">1.0</property>
-            <property name="name" type="string">質量 {name}</property>
-            <property name="color" type="object">
-            <object class="java.awt.Color">
-                <property name="red" type="int">{r}</property>
-                <property name="green" type="int">{g}</property>
-                <property name="blue" type="int">{b}</property>
-                <property name="alpha" type="int">255</property>
-            </object>
-            </property>
-            <property name="footprint" type="string">Footprint.Diamond</property>
-            <property name="visible" type="boolean">true</property>
-            <property name="trail" type="boolean">true</property>
-            <property name="framedata" type="array" class="[Lorg.opensourcephysics.cabrillo.tracker.PointMass$FrameData;">
-                <property name="[0]" type="object">
-                <object class="org.opensourcephysics.cabrillo.tracker.PointMass$FrameData">
-                    <property name="x" type="double">{float(x)}</property>
-                    <property name="y" type="double">{float(y)}</property>
-                </object>
-                </property>
-            </property>
-        </object>
-        </property>"""
+def make_trk(video_path, markers, calib_p1, calib_p2,
+             frame_count, fps, width, height):
 
-
-def make_trk_from_template(template_path, video_path,
-                            markers, calib_p1, calib_p2,
-                            frame_count, fps, width, height):
-    with open(template_path, encoding="utf-8") as f:
-        trk = f.read()
-
-    # --- スケール計算（ピクセル/メートル）---
     dx = calib_p2[0] - calib_p1[0]
     dy = calib_p2[1] - calib_p1[1]
-    calib_px = (dx**2 + dy**2) ** 0.5
-    ppm = calib_px / CALIBRATION_LENGTH_M   # pixels per meter
+    ppm = ((dx**2 + dy**2) ** 0.5) / CALIBRATION_LENGTH_M
 
-    # --- frame times 文字列 ---
-    times = [i * 1000.0 / fps for i in range(frame_count)]
-    times_str = "{" + ",".join(f"{t:.3f}".rstrip('0').rstrip('.') for t in times) + "}"
+    # frame times (ms)
+    times = ",".join(str(round(i * 1000.0 / fps, 3)) for i in range(frame_count))
+    times_str = "{" + times + "}"
 
-    # --- 動画パス ---
-    trk = re.sub(
-        r'(<property name="path" type="string">)[^<]*(</property>)',
-        r'\g<1>' + Path(video_path).name + r'\2',
-        trk)
+    # 座標系原点 = マーカー1番目（スクリーン座標そのまま）
+    ox, oy = float(markers[0][0]), float(markers[0][1])
 
-    # --- frame_times ---
-    trk = re.sub(
-        r'(<property name="array" type="string">)\{[^}]*\}(</property>)',
-        r'\g<1>' + times_str + r'\2',
-        trk)
+    # キャリブレーション（スクリーン座標そのまま）
+    cx1, cy1 = float(calib_p1[0]), float(calib_p1[1])
+    cx2, cy2 = float(calib_p2[0]), float(calib_p2[1])
 
-    # --- duration ---
-    trk = re.sub(
-        r'(<property name="duration" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{frame_count/fps:.3f}' + r'\2',
-        trk)
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<object class="org.opensourcephysics.cabrillo.tracker.TrackerPanel">',
+        f'  <property name="semantic_version" type="string">6.3.4</property>',
+        f'  <property name="width" type="double">{width}.0</property>',
+        f'  <property name="height" type="double">{height}.0</property>',
+        '  <property name="videoclip" type="object">',
+        '  <object class="org.opensourcephysics.media.core.VideoClip">',
+        '    <property name="video" type="object">',
+        '    <object class="org.opensourcephysics.media.xuggle.XuggleVideo">',
+        f'      <property name="path" type="string">{Path(video_path).name}</property>',
+        '      <property name="start_times" type="array" class="[D">',
+        f'        <property name="array" type="string">{times_str}</property>',
+        '      </property>',
+        f'      <property name="duration" type="double">{frame_count/fps:.3f}</property>',
+        f'      <property name="frame_count" type="int">{frame_count}</property>',
+        f'      <property name="frame_rate" type="int">{int(round(fps))}</property>',
+        '      <property name="platform" type="string">Java</property>',
+        '    </object>',
+        '    </property>',
+        f'    <property name="video_framecount" type="int">{frame_count}</property>',
+        '    <property name="startframe" type="int">0</property>',
+        '    <property name="stepsize" type="int">1</property>',
+        f'    <property name="stepcount" type="int">{frame_count}</property>',
+        '    <property name="starttime" type="double">0.0</property>',
+        '    <property name="readout" type="string">frame</property>',
+        '    <property name="playallsteps" type="boolean">true</property>',
+        '  </object>',
+        '  </property>',
+        '  <property name="clipcontrol" type="object">',
+        '  <object class="org.opensourcephysics.media.core.StepperClipControl">',
+        '    <property name="rate" type="double">1.0</property>',
+        f'    <property name="delta_t" type="double">{1000.0/fps}</property>',
+        f'    <property name="frame" type="int">{frame_count-1}</property>',
+        '  </object>',
+        '  </property>',
+        '  <property name="coords" type="object">',
+        '  <object class="org.opensourcephysics.media.core.ImageCoordSystem">',
+        '    <property name="fixedorigin" type="boolean">true</property>',
+        '    <property name="fixedangle" type="boolean">true</property>',
+        '    <property name="fixedscale" type="boolean">true</property>',
+        '    <property name="locked" type="boolean">false</property>',
+        '    <property name="framedata" type="array" class="[Lorg.opensourcephysics.media.core.ImageCoordSystem$FrameData;">',
+        '      <property name="[0]" type="object">',
+        '      <object class="org.opensourcephysics.media.core.ImageCoordSystem$FrameData">',
+        f'        <property name="xorigin" type="double">{ox}</property>',
+        f'        <property name="yorigin" type="double">{oy}</property>',
+        '        <property name="angle" type="double">0.0</property>',
+        f'        <property name="xscale" type="double">{ppm}</property>',
+        f'        <property name="yscale" type="double">{ppm}</property>',
+        '      </object>',
+        '      </property>',
+        '    </property>',
+        '  </object>',
+        '  </property>',
+        '  <property name="length_unit" type="string">m</property>',
+        '  <property name="mass_unit" type="string">kg</property>',
+        '  <property name="units_visible" type="boolean">true</property>',
+        '  <property name="tracks" type="collection" class="java.util.ArrayList">',
+        # 座標軸
+        '    <property name="item" type="object">',
+        '    <object class="org.opensourcephysics.cabrillo.tracker.CoordAxes">',
+        '      <property name="name" type="string">軸</property>',
+        '      <property name="visible" type="boolean">true</property>',
+        '    </object>',
+        '    </property>',
+        # キャリブレーションスティック
+        '    <property name="item" type="object">',
+        '    <object class="org.opensourcephysics.cabrillo.tracker.TapeMeasure">',
+        '      <property name="name" type="string">キャリブレーションスティック A</property>',
+        '      <property name="footprint" type="string">Footprint.BoldDoubleTarget</property>',
+        '      <property name="visible" type="boolean">true</property>',
+        '      <property name="fixedtape" type="boolean">true</property>',
+        '      <property name="fixedlength" type="boolean">true</property>',
+        '      <property name="stickmode" type="boolean">true</property>',
+        '      <property name="framedata" type="array" class="[Lorg.opensourcephysics.cabrillo.tracker.TapeMeasure$FrameData;">',
+        '        <property name="[0]" type="object">',
+        '        <object class="org.opensourcephysics.cabrillo.tracker.TapeMeasure$FrameData">',
+        f'          <property name="x1" type="double">{cx1}</property>',
+        f'          <property name="y1" type="double">{cy1}</property>',
+        f'          <property name="x2" type="double">{cx2}</property>',
+        f'          <property name="y2" type="double">{cy2}</property>',
+        '        </object>',
+        '        </property>',
+        '      </property>',
+        '      <property name="worldlengths" type="array" class="[Ljava.lang.Double;">',
+        f'        <property name="[0]" type="double">{CALIBRATION_LENGTH_M}</property>',
+        '      </property>',
+        '    </object>',
+        '    </property>',
+    ]
 
-    # --- frame_count (XuggleVideo内) ---
-    trk = re.sub(
-        r'(<property name="frame_count" type="int">)[^<]*(</property>)',
-        r'\g<1>' + str(frame_count) + r'\2',
-        trk)
+    # マーカー 8個
+    for i, (mx, my) in enumerate(markers):
+        r, g, b = COLORS_RGB[i]
+        lines += [
+            '    <property name="item" type="object">',
+            '    <object class="org.opensourcephysics.cabrillo.tracker.PointMass">',
+            '      <property name="mass" type="double">1.0</property>',
+            f'      <property name="name" type="string">質量 {chr(65+i)}</property>',
+            '      <property name="color" type="object">',
+            '      <object class="java.awt.Color">',
+            f'        <property name="red" type="int">{r}</property>',
+            f'        <property name="green" type="int">{g}</property>',
+            f'        <property name="blue" type="int">{b}</property>',
+            '        <property name="alpha" type="int">255</property>',
+            '      </object>',
+            '      </property>',
+            '      <property name="footprint" type="string">Footprint.Diamond</property>',
+            '      <property name="visible" type="boolean">true</property>',
+            '      <property name="trail" type="boolean">true</property>',
+            '      <property name="framedata" type="array" class="[Lorg.opensourcephysics.cabrillo.tracker.PointMass$FrameData;">',
+            '        <property name="[0]" type="object">',
+            '        <object class="org.opensourcephysics.cabrillo.tracker.PointMass$FrameData">',
+            f'          <property name="x" type="double">{float(mx)}</property>',
+            f'          <property name="y" type="double">{float(my)}</property>',
+            '        </object>',
+            '        </property>',
+            '      </property>',
+            '    </object>',
+            '    </property>',
+        ]
 
-    # --- frame_rate ---
-    trk = re.sub(
-        r'(<property name="frame_rate" type="int">)[^<]*(</property>)',
-        r'\g<1>' + str(int(round(fps))) + r'\2',
-        trk)
-
-    # --- video_framecount / stepcount ---
-    trk = re.sub(
-        r'(<property name="video_framecount" type="int">)[^<]*(</property>)',
-        r'\g<1>' + str(frame_count) + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="stepcount" type="int">)[^<]*(</property>)',
-        r'\g<1>' + str(frame_count) + r'\2',
-        trk)
-
-    # --- clipcontrol delta_t & last frame ---
-    trk = re.sub(
-        r'(<property name="delta_t" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{1000.0/fps:.6f}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="frame" type="int">)[^<]*(</property>)',
-        r'\g<1>' + str(frame_count - 1) + r'\2',
-        trk)
-
-    # --- width / height ---
-    trk = re.sub(
-        r'(<property name="width" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{width}.0' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="height" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{height}.0' + r'\2',
-        trk)
-
-    # --- 座標系 origin（マーカー1番目 = 生ピクセル座標、Y下向きそのまま）---
-    trk = re.sub(
-        r'(<property name="xorigin" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(markers[0][0])}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="yorigin" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(markers[0][1])}' + r'\2',
-        trk)
-
-    # --- スケール ---
-    trk = re.sub(
-        r'(<property name="xscale" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{ppm}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="yscale" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{ppm}' + r'\2',
-        trk)
-
-    # --- キャリブレーションスティック座標（生ピクセル、Y下向きそのまま）---
-    trk = re.sub(
-        r'(<property name="x1" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(calib_p1[0])}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="y1" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(calib_p1[1])}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="x2" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(calib_p2[0])}' + r'\2',
-        trk)
-    trk = re.sub(
-        r'(<property name="y2" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{float(calib_p2[1])}' + r'\2',
-        trk)
-
-    # --- キャリブレーション長さ ---
-    trk = re.sub(
-        r'(<property name="\[0\]" type="double">)[^<]*(</property>)',
-        r'\g<1>' + f'{CALIBRATION_LENGTH_M}' + r'\2',
-        trk)
-
-    # --- 既存のPointMassを全部削除 ---
-    trk = re.sub(
-        r'[ \t]*<property name="item" type="object">\s*'
-        r'<object class="org\.opensourcephysics\.cabrillo\.tracker\.PointMass">.*?'
-        r'</object>\s*</property>\s*',
-        '', trk, flags=re.DOTALL)
-
-    # --- 8個のPointMassを tracks コレクションの閉じタグ直前に挿入 ---
-    new_masses = "\n".join(
-        build_pointmass_xml(i, mx, my, MARKER_COLORS_RGB[i])
-        for i, (mx, my) in enumerate(markers)
-    )
-
-    # tracks collection の閉じタグを探す（ファイル末尾側から最後の </property>）
-    close_tag = '    </property>\n</object>'
-    idx = trk.rfind(close_tag)
-    if idx == -1:
-        close_tag = '    </property>\r\n</object>'
-        idx = trk.rfind(close_tag)
-    if idx == -1:
-        raise ValueError("テンプレートTRKの末尾構造が認識できませんでした。")
-
-    trk = trk[:idx] + new_masses + '\n' + trk[idx:]
-    return trk
+    lines += ['  </property>', '</object>']
+    return "\n".join(lines)
 
 
 # -----------------------------------------------------------------------
@@ -212,8 +181,6 @@ class App(tk.Tk):
         super().__init__()
         self.title("Tracker 半自動ツール")
         self.resizable(False, False)
-
-        self.template_path = None
         self.videos = []
         self.video_idx = 0
         self.first_frame = None
@@ -224,21 +191,15 @@ class App(tk.Tk):
         self.markers = []
         self.calib_pts = []
         self._cimg = None
-
         self._build_ui()
         if video_dir:
             self._load_folder(video_dir)
 
     def _build_ui(self):
         pad = dict(padx=6, pady=3)
-
         top = ttk.Frame(self)
         top.pack(fill="x", **pad)
-        ttk.Button(top, text="テンプレートTRK", command=self._pick_template).pack(side="left")
-        self.lbl_tmpl = ttk.Label(top, text="未選択", foreground="red")
-        self.lbl_tmpl.pack(side="left", padx=6)
-        ttk.Separator(top, orient="vertical").pack(side="left", fill="y", padx=6)
-        ttk.Button(top, text="動画フォルダ", command=self._choose_folder).pack(side="left")
+        ttk.Button(top, text="動画フォルダを開く", command=self._choose_folder).pack(side="left")
         self.lbl_file = ttk.Label(top, text="未選択", foreground="gray")
         self.lbl_file.pack(side="left", padx=6)
         self.lbl_prog = ttk.Label(top, text="")
@@ -249,7 +210,7 @@ class App(tk.Tk):
         self.canvas.pack(**pad)
         self.canvas.bind("<ButtonPress-1>", self._on_click)
 
-        self.lbl_hint = ttk.Label(self, text="① テンプレートTRKを選択　② 動画フォルダを選択",
+        self.lbl_hint = ttk.Label(self, text="動画フォルダを選択してください。",
                                   foreground="gray", font=("", 10))
         self.lbl_hint.pack()
 
@@ -265,26 +226,12 @@ class App(tk.Tk):
         self.lbl_status = ttk.Label(self, text="", foreground="blue")
         self.lbl_status.pack()
 
-    # ---- template ----
-    def _pick_template(self):
-        p = filedialog.askopenfilename(
-            title="テンプレートにするTRKファイルを選択",
-            filetypes=[("TRKファイル", "*.trk"), ("すべて", "*.*")])
-        if p:
-            self.template_path = p
-            self.lbl_tmpl.config(text=Path(p).name, foreground="green")
-
-    # ---- folder ----
     def _choose_folder(self):
         d = filedialog.askdirectory(title="動画フォルダを選択")
         if d:
             self._load_folder(d)
 
     def _load_folder(self, d):
-        if not self.template_path:
-            messagebox.showwarning("テンプレート未選択",
-                "先にテンプレートTRKファイルを選択してください。")
-            return
         exts = ("*.mp4","*.MP4","*.mov","*.MOV","*.avi","*.AVI","*.mkv","*.MKV")
         vids = []
         for e in exts:
@@ -320,9 +267,8 @@ class App(tk.Tk):
         self._update_hint()
         self._redraw()
 
-    # ---- canvas ----
     def _canvas_to_frame(self, cx, cy):
-        scale = min(PREVIEW_W / self.frame_w, PREVIEW_H / self.frame_h)
+        scale = min(PREVIEW_W/self.frame_w, PREVIEW_H/self.frame_h)
         nw, nh = int(self.frame_w*scale), int(self.frame_h*scale)
         ox, oy = (PREVIEW_W-nw)//2, (PREVIEW_H-nh)//2
         fx = max(0, min(self.frame_w-1, int((cx-ox)/scale)))
@@ -353,8 +299,7 @@ class App(tk.Tk):
         if self.phase == "markers":
             n = len(self.markers)
             self.lbl_hint.config(
-                text=f"マーカー {n+1}/8 をクリック（残り {8-n} 個）",
-                foreground="black")
+                text=f"マーカー {n+1}/8 をクリック（残り {8-n} 個）", foreground="black")
         elif self.phase == "calib":
             c = len(self.calib_pts)
             self.lbl_hint.config(
@@ -370,10 +315,10 @@ class App(tk.Tk):
         scale = min(PREVIEW_W/self.frame_w, PREVIEW_H/self.frame_h)
         nw, nh = int(self.frame_w*scale), int(self.frame_h*scale)
         for i, (mx, my) in enumerate(self.markers):
-            color = MARKER_COLORS_BGR[i % len(MARKER_COLORS_BGR)]
-            cv2.drawMarker(frame, (mx, my), color, cv2.MARKER_CROSS, 20, 2)
+            c = COLORS_BGR[i % len(COLORS_BGR)]
+            cv2.drawMarker(frame, (mx, my), c, cv2.MARKER_CROSS, 20, 2)
             cv2.putText(frame, chr(65+i), (mx+8, my-8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2)
         for i, (px, py) in enumerate(self.calib_pts):
             cv2.circle(frame, (px, py), 8, (0,255,255), 2)
             cv2.putText(frame, f"C{i+1}", (px+10, py-8),
@@ -414,31 +359,24 @@ class App(tk.Tk):
         video_path = self.videos[self.video_idx]
         trk_path = str(Path(video_path).with_suffix(".trk"))
         try:
-            xml = make_trk_from_template(
-                self.template_path, video_path,
-                self.markers, self.calib_pts[0], self.calib_pts[1],
-                self.frame_count, self.fps, self.frame_w, self.frame_h)
+            xml = make_trk(video_path, self.markers,
+                           self.calib_pts[0], self.calib_pts[1],
+                           self.frame_count, self.fps, self.frame_w, self.frame_h)
             with open(trk_path, "w", encoding="utf-8") as f:
                 f.write(xml)
         except Exception as e:
             messagebox.showerror("生成エラー", str(e))
             return
 
-        self.lbl_status.config(
-            text=f"TRK生成: {Path(trk_path).name}  →  Tracker起動中...")
-
-        tracker_exe = r"C:\Program Files\Tracker\Tracker.exe"
-        java_exe    = r"C:\Program Files\Tracker\OpenJDK-21.0.5.jre\bin\java.exe"
-        tracker_jar = r"C:\Program Files\Tracker\tracker-6.3.4.jar"
+        self.lbl_status.config(text=f"TRK生成: {Path(trk_path).name} → Tracker起動中...")
         try:
-            if os.path.exists(tracker_exe):
-                subprocess.Popen([tracker_exe, trk_path])
-            elif os.path.exists(java_exe) and os.path.exists(tracker_jar):
-                subprocess.Popen([java_exe, "-jar", tracker_jar, trk_path])
+            if os.path.exists(TRACKER_EXE):
+                subprocess.Popen([TRACKER_EXE, trk_path])
+            elif os.path.exists(JAVA_EXE) and os.path.exists(TRACKER_JAR):
+                subprocess.Popen([JAVA_EXE, "-jar", TRACKER_JAR, trk_path])
             else:
                 messagebox.showwarning("Tracker未検出",
-                    f"TRKファイルは生成されました:\n{trk_path}\n\n"
-                    "Trackerが見つかりません。手動で開いてください。")
+                    f"TRKは生成しました:\n{trk_path}\n手動で開いてください。")
         except Exception as e:
             messagebox.showerror("起動エラー", str(e))
 
