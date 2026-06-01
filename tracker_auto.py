@@ -53,8 +53,9 @@ def make_trk(video_path: str,
     pixels_per_meter = calib_px / CALIBRATION_LENGTH_M
 
     # ---- 原点 = 1番目のマーカー ----
+    # Tracker の framedata はすべて生ピクセル座標（Y下向き）をそのまま渡す
     origin_x = float(markers[0][0])
-    origin_y = float(height - markers[0][1])   # Tracker はY軸反転
+    origin_y = float(markers[0][1])
 
     # ---- frame_times ----
     times = [i * (1000.0 / fps) for i in range(frame_count)]
@@ -103,7 +104,7 @@ def make_trk(video_path: str,
     lines.append('      <property name="[0]" type="object">')
     lines.append('      <object class="org.opensourcephysics.media.core.ImageCoordSystem$FrameData">')
     lines.append(f'        <property name="xorigin" type="double">{origin_x}</property>')
-    lines.append(f'        <property name="yorigin" type="double">{height - origin_y}</property>')
+    lines.append(f'        <property name="yorigin" type="double">{origin_y}</property>')
     lines.append('        <property name="angle" type="double">0.0</property>')
     lines.append(f'        <property name="xscale" type="double">{pixels_per_meter}</property>')
     lines.append(f'        <property name="yscale" type="double">{pixels_per_meter}</property>')
@@ -127,8 +128,8 @@ def make_trk(video_path: str,
     lines.append('    </property>')
 
     # キャリブレーションスティック
-    cx1, cy1 = float(calib_p1[0]), float(height - calib_p1[1])
-    cx2, cy2 = float(calib_p2[0]), float(height - calib_p2[1])
+    cx1, cy1 = float(calib_p1[0]), float(calib_p1[1])
+    cx2, cy2 = float(calib_p2[0]), float(calib_p2[1])
     lines.append('    <property name="item" type="object">')
     lines.append('    <object class="org.opensourcephysics.cabrillo.tracker.TapeMeasure">')
     lines.append('      <property name="name" type="string">キャリブレーションスティック A</property>')
@@ -161,7 +162,7 @@ def make_trk(video_path: str,
     for i, (mx, my) in enumerate(markers):
         r, g, b = colors[i % len(colors)]
         tx = float(mx)
-        ty = float(height - my)   # Y反転
+        ty = float(my)
         lines.append('    <property name="item" type="object">')
         lines.append('    <object class="org.opensourcephysics.cabrillo.tracker.PointMass">')
         lines.append('      <property name="mass" type="double">1.0</property>')
