@@ -38,12 +38,12 @@ def make_trk(video_path, markers, calib_p1, calib_p2,
     times = ",".join(str(round(i * 1000.0 / fps, 3)) for i in range(frame_count))
     times_str = "{" + times + "}"
 
-    # 座標系原点 = マーカー1番目（スクリーン座標そのまま）
-    ox, oy = float(markers[0][0]), float(markers[0][1])
+    # TrackerのY座標はY=0が画像下端（上下反転）なので height - y に変換
+    def ty(y): return height - y
 
-    # キャリブレーション（スクリーン座標そのまま）
-    cx1, cy1 = float(calib_p1[0]), float(calib_p1[1])
-    cx2, cy2 = float(calib_p2[0]), float(calib_p2[1])
+    ox, oy = float(markers[0][0]), float(ty(markers[0][1]))
+    cx1, cy1 = float(calib_p1[0]), float(ty(calib_p1[1]))
+    cx2, cy2 = float(calib_p2[0]), float(ty(calib_p2[1]))
 
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -160,7 +160,7 @@ def make_trk(video_path, markers, calib_p1, calib_p2,
             '        <property name="[0]" type="object">',
             '        <object class="org.opensourcephysics.cabrillo.tracker.PointMass$FrameData">',
             f'          <property name="x" type="double">{float(mx)}</property>',
-            f'          <property name="y" type="double">{float(my)}</property>',
+            f'          <property name="y" type="double">{float(ty(my))}</property>',
             '        </object>',
             '        </property>',
             '      </property>',
